@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            width: 100%;
+            height: 100%;
+            background: transparent;
+            overflow: hidden;
+        }
+        #container {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            background: transparent;
+        }
+        /* Simli audio is muted — iOS app plays TTS audio directly */
+        audio { display: none; }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <video id="simliVideo" autoplay playsinline muted></video>
+        <audio id="simliAudio" autoplay></audio>
+    </div>
+
+    <script>
+        // -- Globals --
+        let ws = null;
+        let pc = null;
+        let isReady = false;
+
+        // Post events back to Swift
+        function postToSwift(event, detail) {
+            try {
+                window.webkit.messageHandlers.simli.postMessage({ event, detail });
+            } catch (e) {
+                console.log('[simli.html] postToSwift error:', e);
+            }
+        }
+
+        // -- Start Simli session --
+        async function startSimli(sessionToken) {
+            console.log('[simli.html] Starting with token:', sessionToken.substring(0, 12) + '...');
+
+            // Clean up any previous session
+            stopSimli();
+
+            // Connect WebSocket to Simli LipsyncStream
+            ws = new WebSocket('wss://api.simli.ai/LipsyncStream?session_token=' + sessionToken);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = function() {
+                console.log('[simli.html] WebSocket connected');
+            };
+
+            ws.onmessage = async function(event) {
+                if (typeof event.data === 'string') {
+                    console.log('[simli.html] WS message:', event.data.substring(0, 100));
+
+                    if (event.data === 'START') {
+                        console.log('[simli.html] Received START — setting up WebRTC');
+                        await setupWebRTC();
+                    } else {
+                        try {
+                            const msg = JSON.parse(event.data);
+                            if (msg.type === 'answer' && pc) {
+                                console.log('[simli.html] Setting remote SDP answer');
+                                await pc.setRemoteDescription(new RTCSessionDescription(msg));
+                                postToSwift('connected');
+                            }
+                        } catch (e) {
+                            console.log('[simli.html] Non-JSON message:', event.data);
+                        }
+                    }
+                }
+            };
+
+            ws.onerror = function(err) {
+                console.error('[simli.html] WebSocket error:', err);
+                postToSwift('error', 'WebSocket error');
+            };
+
+            ws.onclose = function() {
+                console.log('[simli.html] WebSocket closed');
+                postToSwift('disconnected');
+            };
+        }
+
+        // -- WebRTC setup --
+        async function setupWebRTC() {
+            pc = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
+            });
+
+            // We only receive video and audio from Simli (recvonly)
+            pc.addTransceiver('video', { direction: 'recvonly' });
+            pc.addTransceiver('audio', { direction: 'recvonly' });
+
+            pc.ontrack = function(event) {
+                console.log('[simli.html] Track received:', event.track.kind);
+                if (event.track.kind === 'video') {
+                    const videoEl = document.getElementById('simliVideo');
+                    videoEl.srcObject = event.streams[0];
+                    videoEl.play().then(function() {
+                        console.log('[simli.html] Video playing');
+                        postToSwift('avatarReady');
+                    }).catch(function(e) {
+                        console.error('[simli.html] Video play error:', e);
+                    });
+                } else if (event.track.kind === 'audio') {
+                    // Route audio to hidden audio element (muted in CSS)
+                    // The iOS app plays TTS audio directly through AVAudioEngine
+                    const audioEl = document.getElementById('simliAudio');
+                    audioEl.srcObject = event.streams[0];
+                    // Mute to avoid double audio
+                    audioEl.muted = true;
+                }
+            };
+
+            pc.oniceconnectionstatechange = function() {
+                console.log('[simli.html] ICE state:', pc.iceConnectionState);
+                if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+                    postToSwift('error', 'ICE ' + pc.iceConnectionState);
+                }
+            };
+
+            // Create offer
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            // Wait for ICE gathering to complete (or timeout)
+            await waitForICE();
+
+            // Send offer to Simli via WebSocket
+            const offerPayload = JSON.stringify({
+                type: 'offer',
+                sdp: pc.localDescription.sdp
+            });
+            console.log('[simli.html] Sending SDP offer');
+            ws.send(offerPayload);
+            isReady = true;
+        }
+
+        function waitForICE() {
+            return new Promise(function(resolve) {
+                if (pc.iceGatheringState === 'complete') {
+                    resolve();
+                    return;
+                }
+
+                var resolved = false;
+                pc.onicegatheringstatechange = function() {
+                    if (pc.iceGatheringState === 'complete' && !resolved) {
+                        resolved = true;
+                        resolve();
+                    }
+                };
+
+                // Fallback: don't wait forever
+                setTimeout(function() {
+                    if (!resolved) {
+                        resolved = true;
+                        console.log('[simli.html] ICE gathering timeout — proceeding with partial candidates');
+                        resolve();
+                    }
+                }, 2000);
+            });
+        }
+
+        // -- Send PCM16 audio to Simli for lip-sync --
+        function sendAudio(base64Data) {
+            if (!ws || ws.readyState !== WebSocket.OPEN || !isReady) {
+                return;
+            }
+
+            try {
+                const binaryString = atob(base64Data);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                ws.send(bytes.buffer);
+            } catch (e) {
+                console.error('[simli.html] sendAudio error:', e);
+            }
+        }
+
+        // -- Cleanup --
+        function stopSimli() {
+            isReady = false;
+
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+
+            var videoEl = document.getElementById('simliVideo');
+            if (videoEl && videoEl.srcObject) {
+                videoEl.srcObject.getTracks().forEach(function(t) { t.stop(); });
+                videoEl.srcObject = null;
+            }
+        }
+
+        console.log('[simli.html] Loaded and ready');
+    </script>
+</body>
+</html>
