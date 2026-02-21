@@ -4,7 +4,7 @@ import Combine
 
 /// Manages the Simli avatar session. Gets session token from the bridge server,
 /// then bridges audio data to the WKWebView running the WebRTC client.
-class SimliManager: NSObject, ObservableObject {
+class SimliManager: NSObject, ObservableObject, WKNavigationDelegate {
 
     @Published var isSessionActive = false
     @Published var isAvatarReady = false
@@ -15,6 +15,20 @@ class SimliManager: NSObject, ObservableObject {
     }
 
     weak var webView: WKWebView?
+    private var pendingToken: String?
+    private var isWebViewReady = false
+
+    // MARK: - WKNavigationDelegate
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        print("[SimliManager] WebView finished loading")
+        isWebViewReady = true
+        // If we already have a token waiting, start now
+        if let token = pendingToken {
+            pendingToken = nil
+            injectSimliStart(token: token)
+        }
+    }
 
     // MARK: - Session Lifecycle
 
@@ -27,15 +41,29 @@ class SimliManager: NSObject, ObservableObject {
                 let token = try await fetchSessionFromBridge()
                 await MainActor.run {
                     isSessionActive = true
-                    webView?.evaluateJavaScript("startSimli('\(token)')") { _, error in
-                        if let error = error {
-                            print("[SimliManager] JS error: \(error)")
-                        }
+                    if isWebViewReady {
+                        injectSimliStart(token: token)
+                    } else {
+                        // WebView still loading HTML — queue the token
+                        pendingToken = token
+                        print("[SimliManager] WebView not ready yet, queuing token")
                     }
                 }
             } catch {
                 print("[SimliManager] Session start failed: \(error)")
                 await MainActor.run { connectionState = .error }
+            }
+        }
+    }
+
+    private func injectSimliStart(token: String) {
+        // Use void(0) wrapper to avoid WKWebView error on async Promise return
+        let js = "startSimli('\(token)'); void(0);"
+        webView?.evaluateJavaScript(js) { _, error in
+            if let error = error {
+                print("[SimliManager] JS error: \(error)")
+            } else {
+                print("[SimliManager] startSimli called successfully")
             }
         }
     }

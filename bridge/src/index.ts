@@ -42,6 +42,7 @@ async function getSimliSession(): Promise<string> {
       "x-simli-api-key": SIMLI_API_KEY,
     },
     body: JSON.stringify({
+      apiKey: SIMLI_API_KEY,
       faceId: SIMLI_FACE_ID,
       handleSilence: true,
       syncAudio: true,

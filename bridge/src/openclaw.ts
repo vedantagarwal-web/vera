@@ -144,7 +144,7 @@ export class OpenClawClient {
       const clientId = "gateway-client";
       const clientMode = "backend";
       const role = "operator";
-      const scopes = ["operator.read", "operator.write"];
+      const scopes = ["operator.read", "operator.write", "operator.admin"];
       const signedAt = Date.now();
 
       // Build structured payload: v2|deviceId|clientId|clientMode|role|scopes|signedAtMs|token|nonce

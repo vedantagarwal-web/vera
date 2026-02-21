@@ -45,7 +45,7 @@ class VoiceEngine: ObservableObject {
 
     private func setupAudioEngine() {
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .defaultToSpeaker])
+        try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .defaultToSpeaker])
         try? session.setActive(true)
 
         audioEngine.attach(playerNode)
@@ -137,6 +137,19 @@ class VoiceEngine: ObservableObject {
         let inputNode = audioEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
+        // Validate format — simulator or missing mic can have 0 sample rate
+        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
+            print("[VoiceEngine] Invalid input format: \(inputFormat). No mic available?")
+            return
+        }
+
+        // Target format for bridge: 16kHz mono float
+        guard let targetFormat = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1) else { return }
+        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+            print("[VoiceEngine] Could not create audio converter")
+            return
+        }
+
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
             guard let self = self else { return }
 
@@ -150,8 +163,18 @@ class VoiceEngine: ObservableObject {
                 }
             }
 
-            // Convert to PCM16 and send to bridge
-            if let pcm16 = self.toPCM16(buffer) {
+            // Convert to 16kHz mono then PCM16
+            let ratio = 16000.0 / inputFormat.sampleRate
+            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
+            guard capacity > 0, let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
+
+            var error: NSError?
+            converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
+                outStatus.pointee = .haveData
+                return buffer
+            }
+
+            if error == nil, let pcm16 = self.toPCM16(convertedBuffer) {
                 self.wsTask?.send(.data(pcm16)) { _ in }
             }
         }

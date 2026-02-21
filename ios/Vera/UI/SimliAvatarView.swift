@@ -36,6 +36,7 @@ struct SimliAvatarView: UIViewRepresentable {
 
         // Give the manager a reference to the web view
         simliManager.webView = webView
+        webView.navigationDelegate = simliManager
 
         return webView
     }
