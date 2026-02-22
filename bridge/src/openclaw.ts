@@ -227,43 +227,71 @@ export class OpenClawClient {
       // Handle error response
       if ((msg as any).ok === false) {
         console.error(
-          "[OpenClaw] Auth failed:",
-          (msg as any).error || JSON.stringify(payload)
+          "[OpenClaw] Error:",
+          JSON.stringify((msg as any).error || payload).substring(0, 200)
         );
         return;
       }
+
+      // Handle agent method responses (accepted, completed)
+      if (payload) {
+        const status = payload.status as string | undefined;
+        if (status === "accepted") {
+          console.log(`[OpenClaw] Agent run accepted: ${(payload.runId as string || "").substring(0, 12)}`);
+          return;
+        }
+        if (status === "completed") {
+          // The actual text comes from chat events, not from here
+          console.log(`[OpenClaw] Agent run completed`);
+          return;
+        }
+      }
+      // Handle error response
+      console.log(`[OpenClaw] Response: ${JSON.stringify(payload).substring(0, 200)}`);
+      return;
     }
 
-    // Step 3: Handle agent response events
+    // Step 3: Handle streaming events from agent
     if (type === "event") {
       const event = msg.event as string;
       const payload = msg.payload as Record<string, unknown> | undefined;
 
-      if (
-        event === "message.responded" ||
-        event === "agent.message" ||
-        event === "message.created"
-      ) {
-        const text = (payload?.text || payload?.content || "") as string;
-        if (text) {
-          this.onResponse(text);
-        }
+      // Skip noisy events
+      if (event === "health" || event === "tick" || event === "heartbeat" || event === "presence") return;
 
-        // Check for tool calls (e.g., phone calls)
-        const toolCalls = payload?.toolCalls as
-          | Array<Record<string, unknown>>
-          | undefined;
-        if (toolCalls) {
-          for (const tc of toolCalls) {
-            const name = (tc.name || tc.function) as string;
-            const params = (tc.params || tc.arguments || {}) as Record<
-              string,
-              unknown
-            >;
+      // chat event with state:"final" = complete response
+      if (event === "chat") {
+        const state = payload?.state as string | undefined;
+        const message = payload?.message as Record<string, unknown> | undefined;
+        const content = (message?.content || "") as string;
+
+        if (state === "final" && content) {
+          console.log(`[OpenClaw] Final response: "${content.substring(0, 100)}"`);
+          this.onResponse(content);
+        }
+        return;
+      }
+
+      // agent lifecycle events
+      if (event === "agent") {
+        const data = payload?.data as Record<string, unknown> | undefined;
+        const stream = payload?.stream as string | undefined;
+        // Just log lifecycle, skip deltas (we use chat final instead)
+        if (stream === "lifecycle") {
+          console.log(`[OpenClaw] Agent lifecycle: ${(data?.phase as string) || "?"}`);
+        }
+        // Check for tool calls in assistant stream
+        if (stream === "tool_call" || stream === "tool") {
+          const name = (data?.name || data?.tool) as string;
+          const params = (data?.params || data?.arguments || data?.input || {}) as Record<string, unknown>;
+          if (name) {
             this.onToolCall(name, params);
           }
         }
+        return;
       }
+
+      console.log(`[OpenClaw] Event: ${event} ${JSON.stringify(payload).substring(0, 150)}`);
     }
   }
 
@@ -278,10 +306,11 @@ export class OpenClawClient {
     this.sendJSON({
       type: "req",
       id: String(++this.requestId),
-      method: "message.send",
+      method: "agent",
       params: {
-        session: "main",
-        text,
+        message: text,
+        sessionKey: "agent:main:api:dm:vera-bridge",
+        idempotencyKey: crypto.randomUUID(),
       },
     });
   }

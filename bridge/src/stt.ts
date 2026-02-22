@@ -8,7 +8,7 @@ export class STTClient {
   private ws: WebSocket | null = null;
   private apiKey: string;
   private reconnectAttempts = 0;
-  private maxReconnects = 5;
+  private maxReconnects = 10;
 
   onTranscript: (text: string, isFinal: boolean) => void = () => {};
 
@@ -17,7 +17,9 @@ export class STTClient {
   }
 
   connect() {
-    const url = "wss://waves-api.smallest.ai/api/v1/pulse/get_text";
+    // Config goes in query params, not JSON message
+    const url =
+      "wss://waves-api.smallest.ai/api/v1/pulse/get_text?language=en&sample_rate=16000&encoding=linear16";
     this.ws = new WebSocket(url, {
       headers: { Authorization: `Bearer ${this.apiKey}` },
     });
@@ -25,30 +27,24 @@ export class STTClient {
     this.ws.on("open", () => {
       console.log("[STT] Connected to Smallest AI Pulse");
       this.reconnectAttempts = 0;
-
-      // Send initial config
-      this.ws?.send(
-        JSON.stringify({
-          type: "config",
-          sample_rate: 16000,
-          language: "en",
-        })
-      );
     });
 
     this.ws.on("message", (data) => {
       try {
         const msg = JSON.parse(data.toString());
-        if (msg.text) {
-          this.onTranscript(msg.text, msg.is_final === true);
+        // API uses "transcript" field, not "text"
+        const text = msg.transcript || msg.text || "";
+        if (text) {
+          const isFinal = msg.is_final === true;
+          this.onTranscript(text, isFinal);
         }
       } catch {
-        // ignore non-JSON messages
+        console.log("[STT] Non-JSON message:", data.toString().substring(0, 80));
       }
     });
 
-    this.ws.on("close", () => {
-      console.log("[STT] Disconnected");
+    this.ws.on("close", (code, reason) => {
+      console.log(`[STT] Disconnected (code: ${code}, reason: ${reason.toString() || "none"})`);
       this.maybeReconnect();
     });
 
@@ -67,7 +63,7 @@ export class STTClient {
   /** Signal end of speech */
   endSpeech() {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "end" }));
+      this.ws.send(JSON.stringify({ type: "finalize" }));
     }
   }
 

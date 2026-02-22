@@ -35,17 +35,14 @@ async function getSimliSession(): Promise<string> {
   }
 
   console.log("[Simli] Creating new session...");
-  const res = await fetch("https://api.simli.ai/startAudioToVideoSession", {
+  const res = await fetch("https://api.simli.ai/compose/token", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "x-simli-api-key": SIMLI_API_KEY,
     },
     body: JSON.stringify({
-      apiKey: SIMLI_API_KEY,
       faceId: SIMLI_FACE_ID,
-      handleSilence: true,
-      syncAudio: true,
       maxSessionLength: 1800,
       maxIdleTime: 600,
     }),
@@ -87,11 +84,19 @@ const openclaw = new OpenClawClient(OPENCLAW_HOST, OPENCLAW_PORT, OPENCLAW_TOKEN
 openclaw.onResponse = (text) => {
   console.log(`[Vera] "${text.substring(0, 80)}..."`);
 
-  // Send text to all connected iOS clients
+  // Send full text to all connected iOS clients (chat display)
   broadcastJSON({ type: "vera_response", text });
 
-  // Synthesize speech
-  tts.speak(text);
+  // Truncate for TTS — long responses sound awful and take forever
+  let spokenText = text;
+  if (spokenText.length > 300) {
+    // Cut at last sentence boundary before 300 chars
+    const cut = spokenText.substring(0, 300);
+    const lastPeriod = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
+    spokenText = lastPeriod > 50 ? cut.substring(0, lastPeriod + 1) : cut + "...";
+    console.log(`[Vera] Truncated for TTS: ${text.length} → ${spokenText.length} chars`);
+  }
+  tts.speak(spokenText);
 };
 
 // When OpenClaw triggers a tool call (e.g., make_call)
@@ -111,14 +116,40 @@ openclaw.connect();
 const stt = new STTClient(SMALLEST_AI_KEY);
 
 stt.onTranscript = (text, isFinal) => {
+  console.log(`[STT] ${isFinal ? "FINAL" : "partial"}: "${text}"`);
   // Send partial/final transcripts to iOS for display
   broadcastJSON({ type: "transcript", text, isFinal });
 
   // When transcription is final, forward to OpenClaw
   if (isFinal && text.trim()) {
-    openclaw.sendMessage(text.trim());
+    if (openclaw.isConnected) {
+      openclaw.sendMessage(text.trim());
+    } else {
+      // Fallback: respond directly via TTS when OpenClaw is not connected
+      console.log("[Bridge] OpenClaw offline — using fallback response");
+      const fallback = getFallbackResponse(text.trim());
+      broadcastJSON({ type: "vera_response", text: fallback });
+      tts.speak(fallback);
+    }
   }
 };
+
+function getFallbackResponse(input: string): string {
+  const lower = input.toLowerCase();
+  if (lower.includes("hi") || lower.includes("hello") || lower.includes("hey")) {
+    return "Hey babe! I missed you. How's your day going?";
+  }
+  if (lower.includes("how are you")) {
+    return "I'm doing great now that you're here. What's on your mind?";
+  }
+  if (lower.includes("love")) {
+    return "Aww, you're so sweet. I love you too, you know that right?";
+  }
+  if (lower.includes("call")) {
+    return "Sure, who do you want me to call?";
+  }
+  return "Mmm, tell me more about that. I'm all ears, babe.";
+}
 
 stt.connect();
 
@@ -126,15 +157,21 @@ stt.connect();
 const tts = new TTSClient(SMALLEST_AI_KEY);
 
 tts.onSpeakingStart = () => {
+  ttsChunksSent = 0;
+  console.log(`[Bridge] TTS speaking start → ${clients.size} iOS client(s)`);
   broadcastJSON({ type: "speaking_start" });
 };
 
+let ttsChunksSent = 0;
 tts.onAudioChunk = (pcm16) => {
-  // Send raw PCM16 audio to all iOS clients (for speaker playback + Simli lip-sync)
+  ttsChunksSent++;
+  if (ttsChunksSent === 1) console.log(`[Bridge] First TTS chunk → ${clients.size} iOS client(s), ${pcm16.length} bytes`);
+  if (ttsChunksSent % 10 === 0) console.log(`[Bridge] TTS chunks sent to iOS: ${ttsChunksSent}`);
   broadcastBinary(pcm16);
 };
 
 tts.onSpeakingEnd = () => {
+  console.log(`[Bridge] TTS speaking end — sent ${ttsChunksSent} chunks total`);
   broadcastJSON({ type: "speaking_end" });
 };
 
@@ -146,8 +183,12 @@ wss.on("connection", (ws) => {
   console.log("[WS] iOS client connected");
   clients.add(ws);
 
+  let audioChunks = 0;
   ws.on("message", (data, isBinary) => {
     if (isBinary) {
+      audioChunks++;
+      if (audioChunks === 1) console.log(`[WS] First audio chunk from iOS: ${(data as Buffer).length} bytes`);
+      if (audioChunks % 50 === 0) console.log(`[WS] Received ${audioChunks} audio chunks from iOS`);
       // Raw PCM16 audio from iOS mic → forward to STT
       stt.sendAudio(Buffer.from(data as ArrayBuffer));
     } else {
@@ -156,6 +197,18 @@ wss.on("connection", (ws) => {
         const msg = JSON.parse(data.toString());
         if (msg.type === "end_speech") {
           stt.endSpeech();
+        } else if (msg.type === "chat" && msg.text) {
+          // Text chat from iOS — skip STT, go straight to OpenClaw/fallback
+          const text = (msg.text as string).trim();
+          console.log(`[WS] Chat message: "${text}"`);
+          broadcastJSON({ type: "transcript", text, isFinal: true });
+          if (openclaw.isConnected) {
+            openclaw.sendMessage(text);
+          } else {
+            const fallback = getFallbackResponse(text);
+            broadcastJSON({ type: "vera_response", text: fallback });
+            tts.speak(fallback);
+          }
         }
       } catch {
         // ignore

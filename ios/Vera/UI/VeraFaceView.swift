@@ -6,6 +6,7 @@ struct VeraFaceView: View {
     @StateObject private var voice = VoiceEngine()
     @StateObject private var simli = SimliManager()
     @StateObject private var callManager = VeraCallManager()
+    @State private var showChat = false
 
     var body: some View {
         ZStack {
@@ -13,19 +14,18 @@ struct VeraFaceView: View {
             EmotionBackground(emotion: voice.currentEmotion)
                 .ignoresSafeArea()
 
+            // ── Face mode (always rendered, hidden when chat is open) ──
             VStack(spacing: 0) {
                 Spacer()
 
-                // ── Vera's Face ──────────────────────────────────
+                // Vera's Face
                 ZStack {
-                    // Glow ring
                     Circle()
                         .stroke(emotionColor.opacity(voice.isSpeaking ? 0.5 : 0.15), lineWidth: 2)
                         .frame(width: 300, height: 300)
                         .scaleEffect(voice.isSpeaking ? 1.0 + CGFloat(voice.audioAmplitude) * 0.05 : 1.0)
                         .animation(.easeInOut(duration: 0.1), value: voice.audioAmplitude)
 
-                    // Avatar circle
                     Circle()
                         .fill(.black)
                         .frame(width: 280, height: 280)
@@ -37,7 +37,6 @@ struct VeraFaceView: View {
                                 .animation(.easeInOut(duration: 0.5), value: simli.isAvatarReady)
                         }
                         .overlay {
-                            // Placeholder while avatar loads
                             if !simli.isAvatarReady {
                                 Image(systemName: "person.circle.fill")
                                     .resizable()
@@ -49,7 +48,7 @@ struct VeraFaceView: View {
 
                 Spacer().frame(height: 40)
 
-                // ── Vera's words ─────────────────────────────────
+                // Vera's words
                 if !voice.veraText.isEmpty {
                     Text(voice.veraText)
                         .font(.system(size: 17, weight: .light, design: .serif))
@@ -61,7 +60,7 @@ struct VeraFaceView: View {
                         .animation(.easeInOut(duration: 0.3), value: voice.veraText)
                 }
 
-                // ── User's words (while listening) ───────────────
+                // User's words (while listening)
                 if !voice.transcript.isEmpty && voice.isListening {
                     Text(voice.transcript)
                         .font(.system(size: 13))
@@ -73,21 +72,100 @@ struct VeraFaceView: View {
 
                 Spacer()
 
-                // ── Mic button ───────────────────────────────────
-                MicButton(
-                    isListening: voice.isListening,
-                    amplitude: voice.audioAmplitude
-                ) {
-                    if voice.isListening {
-                        voice.stopListening()
-                    } else {
-                        voice.startListening()
+                // Bottom controls: chat button + mic button
+                HStack(spacing: 32) {
+                    Button {
+                        withAnimation(.spring(response: 0.35)) { showChat = true }
+                    } label: {
+                        Image(systemName: "text.bubble")
+                            .font(.system(size: 20))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .frame(width: 48, height: 48)
+                            .background(.white.opacity(0.08))
+                            .clipShape(Circle())
                     }
+
+                    MicButton(
+                        isListening: voice.isListening,
+                        amplitude: voice.audioAmplitude
+                    ) {
+                        if voice.isListening {
+                            voice.stopListening()
+                        } else {
+                            voice.startListening()
+                        }
+                    }
+
+                    Color.clear.frame(width: 48, height: 48)
                 }
                 .padding(.bottom, 60)
             }
+            .opacity(showChat ? 0 : 1)
 
-            // ── Call overlay ─────────────────────────────────────
+            // ── Chat mode (overlaid on top) ──────────────────
+            if showChat {
+                VStack(spacing: 0) {
+                    // Top bar
+                    HStack(spacing: 12) {
+                        Circle()
+                            .fill(.black)
+                            .frame(width: 44, height: 44)
+                            .overlay {
+                                Image(systemName: "person.circle.fill")
+                                    .resizable()
+                                    .frame(width: 24, height: 24)
+                                    .foregroundStyle(.white.opacity(0.3))
+                            }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Vera")
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundStyle(.white)
+                            if voice.isSpeaking {
+                                Text("speaking...")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.white.opacity(0.5))
+                            }
+                        }
+
+                        Spacer()
+
+                        // Mic button (small)
+                        Button {
+                            if voice.isListening {
+                                voice.stopListening()
+                            } else {
+                                voice.startListening()
+                            }
+                        } label: {
+                            Image(systemName: voice.isListening ? "waveform" : "mic")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundStyle(voice.isListening ? .black : .white)
+                                .frame(width: 36, height: 36)
+                                .background(voice.isListening ? .white : .white.opacity(0.15))
+                                .clipShape(Circle())
+                        }
+
+                        // Back to face
+                        Button {
+                            withAnimation(.spring(response: 0.35)) { showChat = false }
+                        } label: {
+                            Image(systemName: "person.crop.circle")
+                                .font(.system(size: 20))
+                                .foregroundStyle(.white.opacity(0.7))
+                                .frame(width: 36, height: 36)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(.ultraThinMaterial.opacity(0.3))
+
+                    ChatView(voice: voice)
+                }
+                .transition(.opacity)
+            }
+
+            // ── Call overlay ─────────────────────────────────
             if callManager.isCallActive {
                 CallOverlayView(name: callManager.callContactName ?? "") {
                     callManager.endCall()
@@ -97,11 +175,9 @@ struct VeraFaceView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
-            // Wire audio to Simli for lip-sync
             voice.onAudioReceived = { [weak simli] data in
                 simli?.sendAudio(data)
             }
-            // Start avatar session
             simli.startSession()
         }
         .onChange(of: voice.pendingCall) { _, call in

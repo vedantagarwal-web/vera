@@ -27,8 +27,14 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_http._tcp</string>
+	</array>
 	<key>NSContactsUsageDescription</key>
 	<string>Vera needs contacts to call people on your behalf</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Vera connects to the bridge server on your local network</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Vera needs your microphone to hear you</string>
 	<key>UIApplicationSceneManifest</key>

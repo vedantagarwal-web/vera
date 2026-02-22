@@ -2,7 +2,7 @@ import Foundation
 
 struct Config {
     // Change this to the IP of the machine running the Vera bridge server
-    static let bridgeIP = "192.168.1.100"
+    static let bridgeIP = "10.1.10.116"
     static let bridgeWS = "ws://\(bridgeIP):3001/ws"
     static let bridgeHTTP = "http://\(bridgeIP):3001"
 

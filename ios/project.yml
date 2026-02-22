@@ -42,5 +42,8 @@ targets:
           UIApplicationSupportsMultipleScenes: false
         NSMicrophoneUsageDescription: "Vera needs your microphone to hear you"
         NSContactsUsageDescription: "Vera needs contacts to call people on your behalf"
+        NSLocalNetworkUsageDescription: "Vera connects to the bridge server on your local network"
+        NSBonjourServices:
+          - _http._tcp
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true

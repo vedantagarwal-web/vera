@@ -36,14 +36,14 @@
 
     <script>
         // -- Globals --
-        let ws = null;
-        let pc = null;
-        let isReady = false;
+        var ws = null;
+        var pc = null;
+        var isReady = false;
 
         // Post events back to Swift
         function postToSwift(event, detail) {
             try {
-                window.webkit.messageHandlers.simli.postMessage({ event, detail });
+                window.webkit.messageHandlers.simli.postMessage({ event: event, detail: detail });
             } catch (e) {
                 console.log('[simli.html] postToSwift error:', e);
             }
@@ -51,54 +51,13 @@
 
         // -- Start Simli session --
         async function startSimli(sessionToken) {
-            console.log('[simli.html] Starting with token:', sessionToken.substring(0, 12) + '...');
+            console.log('[simli.html] Starting with token:', sessionToken.substring(0, 16) + '...');
 
             // Clean up any previous session
             stopSimli();
 
-            // Connect WebSocket to Simli LipsyncStream
-            ws = new WebSocket('wss://api.simli.ai/LipsyncStream?session_token=' + sessionToken);
-            ws.binaryType = 'arraybuffer';
-
-            ws.onopen = function() {
-                console.log('[simli.html] WebSocket connected');
-            };
-
-            ws.onmessage = async function(event) {
-                if (typeof event.data === 'string') {
-                    console.log('[simli.html] WS message:', event.data.substring(0, 100));
-
-                    if (event.data === 'START') {
-                        console.log('[simli.html] Received START — setting up WebRTC');
-                        await setupWebRTC();
-                    } else {
-                        try {
-                            const msg = JSON.parse(event.data);
-                            if (msg.type === 'answer' && pc) {
-                                console.log('[simli.html] Setting remote SDP answer');
-                                await pc.setRemoteDescription(new RTCSessionDescription(msg));
-                                postToSwift('connected');
-                            }
-                        } catch (e) {
-                            console.log('[simli.html] Non-JSON message:', event.data);
-                        }
-                    }
-                }
-            };
-
-            ws.onerror = function(err) {
-                console.error('[simli.html] WebSocket error:', err);
-                postToSwift('error', 'WebSocket error');
-            };
-
-            ws.onclose = function() {
-                console.log('[simli.html] WebSocket closed');
-                postToSwift('disconnected');
-            };
-        }
-
-        // -- WebRTC setup --
-        async function setupWebRTC() {
+            // Step 1: Create WebRTC peer connection FIRST
+            console.log('[simli.html] Creating RTCPeerConnection...');
             pc = new RTCPeerConnection({
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
@@ -113,46 +72,99 @@
             pc.ontrack = function(event) {
                 console.log('[simli.html] Track received:', event.track.kind);
                 if (event.track.kind === 'video') {
-                    const videoEl = document.getElementById('simliVideo');
+                    var videoEl = document.getElementById('simliVideo');
                     videoEl.srcObject = event.streams[0];
                     videoEl.play().then(function() {
-                        console.log('[simli.html] Video playing');
+                        console.log('[simli.html] Video playing!');
+                        isReady = true;
                         postToSwift('avatarReady');
                     }).catch(function(e) {
-                        console.error('[simli.html] Video play error:', e);
+                        console.error('[simli.html] Video play error:', e.message);
                     });
                 } else if (event.track.kind === 'audio') {
-                    // Route audio to hidden audio element (muted in CSS)
-                    // The iOS app plays TTS audio directly through AVAudioEngine
-                    const audioEl = document.getElementById('simliAudio');
+                    var audioEl = document.getElementById('simliAudio');
                     audioEl.srcObject = event.streams[0];
-                    // Mute to avoid double audio
                     audioEl.muted = true;
+                    console.log('[simli.html] Audio track attached (muted)');
                 }
             };
 
             pc.oniceconnectionstatechange = function() {
                 console.log('[simli.html] ICE state:', pc.iceConnectionState);
+                if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+                    console.log('[simli.html] ICE connected!');
+                }
                 if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
                     postToSwift('error', 'ICE ' + pc.iceConnectionState);
                 }
             };
 
-            // Create offer
-            const offer = await pc.createOffer();
+            pc.onconnectionstatechange = function() {
+                console.log('[simli.html] Connection state:', pc.connectionState);
+            };
+
+            // Step 2: Create SDP offer
+            console.log('[simli.html] Creating SDP offer...');
+            var offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
 
-            // Wait for ICE gathering to complete (or timeout)
+            // Wait for ICE gathering
             await waitForICE();
+            console.log('[simli.html] ICE gathering done, offer ready');
 
-            // Send offer to Simli via WebSocket
-            const offerPayload = JSON.stringify({
-                type: 'offer',
-                sdp: pc.localDescription.sdp
-            });
-            console.log('[simli.html] Sending SDP offer');
-            ws.send(offerPayload);
-            isReady = true;
+            // Step 3: Connect WebSocket to new compose/webrtc/p2p endpoint
+            var wsUrl = 'wss://api.simli.ai/compose/webrtc/p2p?session_token=' + sessionToken + '&enableSFU=false';
+            console.log('[simli.html] Connecting WS to compose/webrtc/p2p...');
+            ws = new WebSocket(wsUrl);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = function() {
+                console.log('[simli.html] WebSocket connected — sending SDP offer');
+                // Send offer immediately
+                var offerPayload = JSON.stringify({
+                    type: 'offer',
+                    sdp: pc.localDescription.sdp
+                });
+                ws.send(offerPayload);
+            };
+
+            ws.onmessage = async function(event) {
+                if (typeof event.data === 'string') {
+                    console.log('[simli.html] WS message:', event.data.substring(0, 120));
+                    // Plain text signals from Simli — not JSON
+                    if (event.data === 'START' || event.data === 'SILENT' || event.data === 'ACK' || event.data === 'SPEAK') {
+                        return;
+                    }
+
+                    try {
+                        var msg = JSON.parse(event.data);
+
+                        // Handle SDP answer
+                        if (msg.type === 'answer' && pc) {
+                            console.log('[simli.html] Setting remote SDP answer');
+                            await pc.setRemoteDescription(new RTCSessionDescription(msg));
+                            console.log('[simli.html] Remote description set OK');
+                            postToSwift('connected');
+                        }
+                        // Handle session info (destination, session_id) — just log
+                        else if (msg.destination || msg.session_id) {
+                            console.log('[simli.html] Session info: id=' + (msg.session_id || 'none'));
+                        }
+                    } catch (e) {
+                        console.log('[simli.html] WS parse error:', e.message, 'data:', event.data.substring(0, 80));
+                    }
+                }
+            };
+
+            ws.onerror = function(err) {
+                console.error('[simli.html] WebSocket error — type:', err.type);
+                postToSwift('error', 'WebSocket error');
+            };
+
+            ws.onclose = function(ev) {
+                console.log('[simli.html] WebSocket closed — code:', ev.code, 'reason:', ev.reason || '(none)', 'clean:', ev.wasClean);
+                postToSwift('disconnected');
+            };
         }
 
         function waitForICE() {
@@ -174,10 +186,10 @@
                 setTimeout(function() {
                     if (!resolved) {
                         resolved = true;
-                        console.log('[simli.html] ICE gathering timeout — proceeding with partial candidates');
+                        console.log('[simli.html] ICE timeout — proceeding with partial candidates');
                         resolve();
                     }
-                }, 2000);
+                }, 3000);
             });
         }
 
@@ -188,9 +200,9 @@
             }
 
             try {
-                const binaryString = atob(base64Data);
-                const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {
+                var binaryString = atob(base64Data);
+                var bytes = new Uint8Array(binaryString.length);
+                for (var i = 0; i < binaryString.length; i++) {
                     bytes[i] = binaryString.charCodeAt(i);
                 }
                 ws.send(bytes.buffer);
